@@ -11,7 +11,9 @@ class Node:
         self.config = config
         self.role = "FOLLOWER"
         self.leader_id = None
+        self.voted_for = None
         self.last_heartbeat = time.time()
+
         self.server = SimpleXMLRPCServer(
             (self.config.host, self.config.port),
             allow_none=True,
@@ -20,6 +22,7 @@ class Node:
 
         self.server.register_function(self.hello, "hello")
         self.server.register_function(self.ping, "ping")
+        self.server.register_function(self.request_vote, "request_vote")
         self.server.register_function(self.become_leader, "become_leader")
         self.server.register_function(self.become_follower, "become_follower")
         self.server.register_function(self.handle_client_request, "handle_client_request")
@@ -50,6 +53,12 @@ class Node:
         self.leader_id = sender_id
         return True
 
+    def request_vote(self, candidate_id):
+        if self.voted_for is None or self.voted_for == candidate_id:
+            self.voted_for = candidate_id
+            return True
+        return False
+
     def become_leader(self, leader_id):
         self.role = "LEADER"
         self.leader_id = leader_id
@@ -64,6 +73,10 @@ class Node:
 
     def handle_client_request(self, value):
         if self.role != "LEADER":
+            if self.leader_id is not None:
+                leader_peer = self._peer_by_id(self.leader_id)
+                if leader_peer:
+                    return self.call_peer(leader_peer, "handle_client_request", value)
             return {
                 "status": "forward",
                 "leader_id": self.leader_id,
@@ -80,3 +93,10 @@ class Node:
         host, port = peer.split(":")
         proxy = xmlrpc.client.ServerProxy(f"http://{host}:{port}", allow_none=True)
         return getattr(proxy, method)(*args)
+
+    def _peer_by_id(self, node_id):
+        for peer in self.config.peers:
+            host, port = peer.split(":")
+            if int(port) == 8000 + node_id:
+                return peer
+        return None
