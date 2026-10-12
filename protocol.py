@@ -1,0 +1,9 @@
+class MessageType:
+    HELLO = "HELLO"
+    PING = "PING"
+    VOTE = "VOTE"
+    LEADER = "LEADER"
+    PROPOSAL = "PROPOSAL"
+    ACK = "ACK"
+    COMMIT = "COMMIT"
+    CLIENT_REQUEST = "CLIENT_REQUEST"
