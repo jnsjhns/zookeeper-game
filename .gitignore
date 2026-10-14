@@ -1,0 +1,6 @@
+# Local node logs
+/data/
+
+# Python cache
+__pycache__/
+*.pyc
