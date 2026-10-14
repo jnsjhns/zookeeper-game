@@ -50,13 +50,18 @@ class Node:
 
     def start(self):
         self.rpc.start()
+
         print(
             f"Node {self.config.node_id} started "
             f"on {self.config.host}:{self.config.port}"
         )
 
+        self.heartbeat.start()
+
     def stop(self):
+        self.heartbeat.stop()
         self.rpc.stop()
+
         print(f"Node {self.config.node_id} stopped")
 
     def hello(self, sender_id):
