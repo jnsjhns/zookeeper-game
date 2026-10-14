@@ -50,13 +50,14 @@ class RpcTransport:
 
         self.server.server_close()
 
-    def call(self, peer_id: int, method: str, *args):
+    def call(self, peer_id: int, method: str, *args, timeout=None):
         address = self.config.peers.get(peer_id)
 
         if address is None:
             raise ValueError(f"Unknown peer: Node {peer_id}")
 
-        transport = TimeoutTransport(self.timeout)
+        effective_timeout = self.timeout if timeout is None else timeout
+        transport = TimeoutTransport(effective_timeout)
 
         with xmlrpc.client.ServerProxy(
             f"http://{address}",

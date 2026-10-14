@@ -1,58 +1,50 @@
-from config import NodeConfig
+import argparse
+import time
+
+from config import NODES, create_config
 from node import Node
 
 
 def main():
-    node1 = Node(
-        NodeConfig(
-            node_id=1,
-            port=8001,
-            peers={2: "127.0.0.1:8002"},
-        )
+    parser = argparse.ArgumentParser(
+        description="Start one ZooKeeper-like node"
     )
 
-    node2 = Node(
-        NodeConfig(
-            node_id=2,
-            port=8002,
-            peers={1: "127.0.0.1:8001"},
-        )
+    parser.add_argument(
+        "--node",
+        type=int,
+        required=True,
+        choices=sorted(NODES),
+        help="Node ID to start",
     )
 
-    node1.start()
-    node2.start()
+    args = parser.parse_args()
+
+    config = create_config(args.node)
+    node = Node(config)
+
+    # Temporary setup: fixed leader, no automatic election yet.
+    if config.node_id == 1:
+        node.election.become_leader()
+    else:
+        node.election.become_follower(leader_id=1)
+
+    node.start()
+
+    print(f"Role: {node.state.role}")
+    print(f"Leader: {node.state.leader_id}")
+    print(f"Log file: {node.log.path.resolve()}")
+    print("Press Ctrl+C to stop this node.")
 
     try:
-        print("\nConnection test:")
-        print(node1.rpc.call(2, "hello", 1))
-        print(node2.rpc.call(1, "hello", 2))
-
-        print("\nStarting election:")
-        if not node1.election.start_election():
-            return
-
-        print("\nNode roles:")
-        print(node1.hello(0))
-        print(node2.hello(0))
-
-        print("\nSending one heartbeat:")
-        node1.heartbeat.send_once()
-        print("Node 2 timeout:", node2.heartbeat.check_timeout())
-
-        print("\nClient request via leader:")
-        print(node1.handle_client_request(50))
-
-        print("\nClient request via follower:")
-        print(node2.handle_client_request(62))
-
-        input("\nPress Enter to stop the nodes...")
+        while True:
+            time.sleep(1)
 
     except KeyboardInterrupt:
-        print("\nStopping...")
+        print("\nStopping node...")
 
     finally:
-        node1.stop()
-        node2.stop()
+        node.stop()
 
 
 if __name__ == "__main__":
