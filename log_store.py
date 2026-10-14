@@ -32,7 +32,10 @@ class LogStore:
             existing = self._find(epoch, seq)
 
             if existing is not None:
-                if existing["op"] != op or existing["value"] != value:
+                if (
+                    existing["op"] != op
+                    or existing["value"] != value
+                ):
                     raise ValueError(
                         f"Conflicting proposal for tag ({epoch}, {seq})"
                     )
@@ -61,6 +64,7 @@ class LogStore:
                 return existing.copy()
 
             entries = [item.copy() for item in self._entries]
+            committed = None
 
             for entry in entries:
                 if self._tag(entry) == (epoch, seq):
@@ -91,6 +95,74 @@ class LogStore:
         with self._lock:
             return [entry.copy() for entry in self._entries]
 
+    def install_entries(self, incoming):
+        with self._lock:
+            merged = {
+                self._tag(entry): entry.copy()
+                for entry in self._entries
+            }
+
+            for entry in incoming:
+                self._validate(entry)
+
+                tag = self._tag(entry)
+                existing = merged.get(tag)
+
+                if existing is None:
+                    merged[tag] = entry.copy()
+                    continue
+
+                if (
+                    existing["op"] != entry["op"]
+                    or existing["value"] != entry["value"]
+                ):
+                    raise ValueError(
+                        f"Conflicting log entries for tag {tag}"
+                    )
+
+                # Never downgrade a committed entry.
+                if entry["status"] == "COMMITTED":
+                    existing["status"] = "COMMITTED"
+
+            entries = sorted(
+                merged.values(),
+                key=self._tag,
+            )
+
+            self._persist(entries)
+            self._entries = entries
+
+            return [entry.copy() for entry in entries]
+
+    def commit_entries(self, tags):
+        with self._lock:
+            requested = {
+                (epoch, seq)
+                for epoch, seq in tags
+            }
+            existing = {
+                self._tag(entry)
+                for entry in self._entries
+            }
+
+            missing = requested - existing
+
+            if missing:
+                raise ValueError(
+                    f"Cannot commit missing entries: {sorted(missing)}"
+                )
+
+            entries = [entry.copy() for entry in self._entries]
+
+            for entry in entries:
+                if self._tag(entry) in requested:
+                    entry["status"] = "COMMITTED"
+
+            self._persist(entries)
+            self._entries = entries
+
+            return True
+
     def _find(self, epoch: int, seq: int):
         for entry in self._entries:
             if self._tag(entry) == (epoch, seq):
@@ -104,7 +176,13 @@ class LogStore:
 
     @staticmethod
     def _validate(entry):
-        required = {"epoch", "seq", "op", "value", "status"}
+        required = {
+            "epoch",
+            "seq",
+            "op",
+            "value",
+            "status",
+        }
 
         if not isinstance(entry, dict) or set(entry) != required:
             raise ValueError("Invalid log entry fields")
@@ -114,13 +192,19 @@ class LogStore:
                 raise ValueError(f"{field} must be an integer")
 
         if entry["epoch"] < 0 or entry["seq"] < 1:
-            raise ValueError("epoch must be >= 0 and seq must be >= 1")
+            raise ValueError(
+                "epoch must be >= 0 and seq must be >= 1"
+            )
 
         if not 0 <= entry["value"] <= 100:
-            raise ValueError("value must be between 0 and 100")
+            raise ValueError(
+                "value must be between 0 and 100"
+            )
 
         if entry["op"] not in {"WRITE", "GUESS"}:
-            raise ValueError("op must be WRITE or GUESS")
+            raise ValueError(
+                "op must be WRITE or GUESS"
+            )
 
         if entry["status"] not in {"PROPOSED", "COMMITTED"}:
             raise ValueError("Invalid entry status")
@@ -140,10 +224,13 @@ class LogStore:
                 try:
                     entry = json.loads(line)
                     self._validate(entry)
+
                     tag = self._tag(entry)
 
                     if tag in seen_tags:
-                        raise ValueError(f"Duplicate tag: {tag}")
+                        raise ValueError(
+                            f"Duplicate tag: {tag}"
+                        )
 
                 except (ValueError, TypeError) as error:
                     raise ValueError(
@@ -161,7 +248,10 @@ class LogStore:
         temporary_path = self.path.with_suffix(".log.tmp")
 
         try:
-            with temporary_path.open("w", encoding="utf-8") as file:
+            with temporary_path.open(
+                "w",
+                encoding="utf-8",
+            ) as file:
                 for entry in entries:
                     file.write(json.dumps(entry) + "\n")
 

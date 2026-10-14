@@ -24,10 +24,24 @@ class ReplicationManager:
         self.peer_timeout = 2.0
         self.forward_timeout = 15.0
 
-        # Temporary initialization for the fixed-leader setup.
-        last_epoch, last_seq = self.log.latest_tag()
-        self.epoch = max(1, last_epoch)
-        self.seq = last_seq if last_epoch == self.epoch else 0
+        # Recovery sets the epoch before enabling writes.
+        self.epoch = None
+        self.seq = 0
+
+    def begin_epoch(self, epoch):
+        # Called during RECOVERING, while writes are disabled.
+        if type(epoch) is not int or epoch < 1:
+            raise ValueError("Epoch must be a positive integer")
+
+        last_epoch, _ = self.log.latest_tag()
+
+        if epoch <= last_epoch:
+            raise ValueError(
+                "New epoch must be greater than existing log epochs"
+            )
+
+        self.epoch = epoch
+        self.seq = 0
 
     def write(self, value):
         if type(value) is not int or not 0 <= value <= 100:
@@ -43,9 +57,18 @@ class ReplicationManager:
         if role == "LEADER":
             return self._propose_and_commit("WRITE", value)
 
+        if role in {"CANDIDATE", "RECOVERING"}:
+            return {
+                "status": "unavailable",
+                "message": (
+                    "Election or recovery in progress; "
+                    "writes are disabled"
+                ),
+            }
+
         if leader_id is None or leader_id == self.state.node_id:
             return {
-                "status": "error",
+                "status": "unavailable",
                 "message": "No usable leader known",
             }
 
@@ -84,15 +107,28 @@ class ReplicationManager:
             with self.state.lock:
                 if self.state.role != "LEADER":
                     return {
-                        "status": "error",
+                        "status": "unavailable",
                         "message": "Node is no longer leader",
                     }
 
-            self.seq += 1
-            epoch = self.epoch
-            seq = self.seq
+                if self.epoch is None:
+                    return {
+                        "status": "unavailable",
+                        "message": "Transaction epoch is not initialized",
+                    }
 
-            self.log.append_proposal(epoch, seq, op, value)
+                term = self.state.term
+                epoch = self.epoch
+
+                self.seq += 1
+                seq = self.seq
+
+                self.log.append_proposal(
+                    epoch,
+                    seq,
+                    op,
+                    value,
+                )
 
             print(f"PROPOSED ({epoch}, {seq}): {op} {value}")
 
@@ -106,6 +142,7 @@ class ReplicationManager:
                     response = self.rpc.call(
                         peer_id,
                         "receive_proposal",
+                        term,
                         epoch,
                         seq,
                         op,
@@ -114,33 +151,66 @@ class ReplicationManager:
                         timeout=self.peer_timeout,
                     )
 
-                    if self._valid_ack(response, peer_id, epoch, seq):
+                    if self._valid_ack(
+                        response,
+                        peer_id,
+                        term,
+                        epoch,
+                        seq,
+                    ):
                         acknowledgements.add(peer_id)
-                        print(f"ACK ({epoch}, {seq}) from Node {peer_id}")
+
+                        print(
+                            f"ACK ({epoch}, {seq}) "
+                            f"from Node {peer_id}"
+                        )
+
                     else:
                         print(f"Invalid ACK from Node {peer_id}")
 
                 except Exception as error:
-                    print(f"Proposal to Node {peer_id} failed: {error}")
+                    print(
+                        f"Proposal to Node {peer_id} failed: {error}"
+                    )
 
-            if len(acknowledgements) < quorum:
-                print(
-                    f"NO QUORUM ({epoch}, {seq}): "
-                    f"{len(acknowledgements)}/{quorum}"
-                )
+            with self.state.lock:
+                if (
+                    self.state.role != "LEADER"
+                    or self.state.term != term
+                    or self.epoch != epoch
+                ):
+                    return {
+                        "status": "error",
+                        "epoch": epoch,
+                        "seq": seq,
+                        "message": (
+                            "Leadership changed; "
+                            "proposal outcome unknown"
+                        ),
+                    }
 
-                return {
-                    "status": "no_quorum",
-                    "epoch": epoch,
-                    "seq": seq,
-                    "acks": len(acknowledgements),
-                    "quorum": quorum,
-                    "message": "Proposal stored, but not committed",
-                }
+                if len(acknowledgements) < quorum:
+                    print(
+                        f"NO QUORUM ({epoch}, {seq}): "
+                        f"{len(acknowledgements)}/{quorum}"
+                    )
 
-            self.log.mark_committed(epoch, seq)
+                    return {
+                        "status": "no_quorum",
+                        "epoch": epoch,
+                        "seq": seq,
+                        "acks": len(acknowledgements),
+                        "quorum": quorum,
+                        "message": (
+                            "Proposal stored, but not committed"
+                        ),
+                    }
 
-            print(f"COMMITTED ({epoch}, {seq}): target = {value}")
+                self.log.mark_committed(epoch, seq)
+
+            print(
+                f"COMMITTED ({epoch}, {seq}): target = {value}"
+            )
 
             pending_peers = []
 
@@ -153,6 +223,7 @@ class ReplicationManager:
                     result = self.rpc.call(
                         peer_id,
                         "receive_commit",
+                        term,
                         epoch,
                         seq,
                         self.state.node_id,
@@ -164,11 +235,15 @@ class ReplicationManager:
 
                 except Exception as error:
                     pending_peers.append(peer_id)
-                    print(f"Commit to Node {peer_id} failed: {error}")
+
+                    print(
+                        f"Commit to Node {peer_id} failed: {error}"
+                    )
 
             return {
                 "status": "committed",
                 "node_id": self.state.node_id,
+                "term": term,
                 "epoch": epoch,
                 "seq": seq,
                 "value": value,
@@ -177,24 +252,40 @@ class ReplicationManager:
                 "pending_peers": pending_peers,
             }
 
-    def receive_proposal(self, epoch, seq, op, value, leader_id):
-        self._check_leader(leader_id)
+    def receive_proposal(
+        self,
+        term,
+        epoch,
+        seq,
+        op,
+        value,
+        leader_id,
+    ):
+        with self.state.lock:
+            self._check_leader(term, leader_id)
 
-        entry = self.log.append_proposal(epoch, seq, op, value)
+            entry = self.log.append_proposal(
+                epoch,
+                seq,
+                op,
+                value,
+            )
 
         print(f"PROPOSED ({epoch}, {seq}): {op} {value}")
 
         return {
             "status": "ACK",
             "node_id": self.state.node_id,
+            "term": term,
             "epoch": entry["epoch"],
             "seq": entry["seq"],
         }
 
-    def receive_commit(self, epoch, seq, leader_id):
-        self._check_leader(leader_id)
+    def receive_commit(self, term, epoch, seq, leader_id):
+        with self.state.lock:
+            self._check_leader(term, leader_id)
 
-        entry = self.log.mark_committed(epoch, seq)
+            entry = self.log.mark_committed(epoch, seq)
 
         print(
             f"COMMITTED ({epoch}, {seq}): "
@@ -203,22 +294,24 @@ class ReplicationManager:
 
         return True
 
-    def _check_leader(self, leader_id):
-        with self.state.lock:
-            if (
-                self.state.role != "FOLLOWER"
-                or self.state.leader_id != leader_id
-            ):
-                raise ValueError(
-                    "Message is not from the known leader"
-                )
+    def _check_leader(self, term, leader_id):
+        # Caller holds state.lock.
+        if (
+            self.state.role != "FOLLOWER"
+            or self.state.leader_id != leader_id
+            or self.state.term != term
+        ):
+            raise ValueError(
+                "Message is not from the current leader"
+            )
 
     @staticmethod
-    def _valid_ack(response, peer_id, epoch, seq):
+    def _valid_ack(response, peer_id, term, epoch, seq):
         return (
             isinstance(response, dict)
             and response.get("status") == "ACK"
             and response.get("node_id") == peer_id
+            and response.get("term") == term
             and response.get("epoch") == epoch
             and response.get("seq") == seq
         )

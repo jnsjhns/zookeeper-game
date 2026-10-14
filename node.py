@@ -2,14 +2,17 @@ from config import NodeConfig
 from election import ElectionManager
 from heartbeat import HeartbeatManager
 from log_store import LogStore
+from recovery import RecoveryManager
 from replication import ReplicationManager
 from rpc import RpcTransport
 from state import NodeState
+from sync import FollowerSyncManager
 
 
 class Node:
     def __init__(self, config: NodeConfig):
         self.config = config
+
         self.state = NodeState(node_id=config.node_id)
         self.log = LogStore(config.node_id)
         self.rpc = RpcTransport(config)
@@ -17,12 +20,14 @@ class Node:
         self.election = ElectionManager(
             config,
             self.state,
+            self.log,
             self.rpc,
         )
 
         self.heartbeat = HeartbeatManager(
             self.state,
             self.rpc,
+            self.election,
         )
 
         self.replication = ReplicationManager(
@@ -32,13 +37,52 @@ class Node:
             self.rpc,
         )
 
-        self.rpc.register("hello", self.hello)
-        self.rpc.register("ping", self.heartbeat.receive)
-        self.rpc.register("request_vote", self.election.request_vote)
-        self.rpc.register("become_follower", self.election.become_follower)
+        self.recovery = RecoveryManager(
+            config,
+            self.state,
+            self.log,
+            self.rpc,
+            self.replication,
+        )
 
-        self.rpc.register("write", self.replication.write)
-        self.rpc.register("read", self.replication.read)
+        self.sync = FollowerSyncManager(
+            config,
+            self.state,
+            self.log,
+            self.rpc,
+            self.replication,
+        )
+
+        # Status
+        self.rpc.register("hello", self.hello)
+
+        # Election
+        self.rpc.register(
+            "election_status",
+            self.election.get_status,
+        )
+        self.rpc.register(
+            "request_vote",
+            self.election.request_vote,
+        )
+
+        # Heartbeats
+        self.rpc.register(
+            "ping",
+            self.heartbeat.receive,
+        )
+
+        # Client operations
+        self.rpc.register(
+            "write",
+            self.replication.write,
+        )
+        self.rpc.register(
+            "read",
+            self.replication.read,
+        )
+
+        # Replication
         self.rpc.register(
             "receive_proposal",
             self.replication.receive_proposal,
@@ -46,6 +90,26 @@ class Node:
         self.rpc.register(
             "receive_commit",
             self.replication.receive_commit,
+        )
+
+        # Recovery after election
+        self.rpc.register(
+            "recovery_get_log",
+            self.recovery.get_log,
+        )
+        self.rpc.register(
+            "recovery_install",
+            self.recovery.install,
+        )
+        self.rpc.register(
+            "recovery_commit",
+            self.recovery.commit,
+        )
+
+        # Catch-up during normal leader operation
+        self.rpc.register(
+            "sync_install",
+            self.sync.install,
         )
 
     def start(self):
@@ -57,18 +121,18 @@ class Node:
         )
 
         self.heartbeat.start()
+        self.recovery.start()
+        self.sync.start()
+        self.election.start()
 
     def stop(self):
+        self.election.stop()
+        self.sync.stop()
+        self.recovery.stop()
         self.heartbeat.stop()
         self.rpc.stop()
 
         print(f"Node {self.config.node_id} stopped")
 
     def hello(self, sender_id):
-        with self.state.lock:
-            return {
-                "status": "ok",
-                "node_id": self.state.node_id,
-                "role": self.state.role,
-                "leader_id": self.state.leader_id,
-            }
+        return self.election.get_status()

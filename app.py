@@ -9,31 +9,19 @@ def main():
     parser = argparse.ArgumentParser(
         description="Start one ZooKeeper-like node"
     )
-
     parser.add_argument(
         "--node",
         type=int,
         required=True,
         choices=sorted(NODES),
-        help="Node ID to start",
     )
 
     args = parser.parse_args()
-
-    config = create_config(args.node)
-    node = Node(config)
-
-    # Temporary setup: fixed leader, no automatic election yet.
-    if config.node_id == 1:
-        node.election.become_leader()
-    else:
-        node.election.become_follower(leader_id=1)
-
+    node = Node(create_config(args.node))
     node.start()
 
-    print(f"Role: {node.state.role}")
-    print(f"Leader: {node.state.leader_id}")
     print(f"Log file: {node.log.path.resolve()}")
+    print("Waiting for automatic leader election...")
     print("Press Ctrl+C to stop this node.")
 
     try:
