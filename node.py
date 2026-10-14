@@ -1,102 +1,79 @@
-import threading
-import time
-import xmlrpc.client
-from xmlrpc.server import SimpleXMLRPCServer
-
 from config import NodeConfig
+from election import ElectionManager
+from heartbeat import HeartbeatManager
+from rpc import RpcTransport
+from state import NodeState
 
 
 class Node:
     def __init__(self, config: NodeConfig):
         self.config = config
-        self.role = "FOLLOWER"
-        self.leader_id = None
-        self.voted_for = None
-        self.last_heartbeat = time.time()
+        self.state = NodeState(node_id=config.node_id)
+        self.rpc = RpcTransport(config)
 
-        self.server = SimpleXMLRPCServer(
-            (self.config.host, self.config.port),
-            allow_none=True,
-            logRequests=False
+        self.election = ElectionManager(
+            config,
+            self.state,
+            self.rpc,
         )
 
-        self.server.register_function(self.hello, "hello")
-        self.server.register_function(self.ping, "ping")
-        self.server.register_function(self.request_vote, "request_vote")
-        self.server.register_function(self.become_leader, "become_leader")
-        self.server.register_function(self.become_follower, "become_follower")
-        self.server.register_function(self.handle_client_request, "handle_client_request")
+        self.heartbeat = HeartbeatManager(
+            self.state,
+            self.rpc,
+        )
 
-        self._thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.rpc.register("hello", self.hello)
+        self.rpc.register("ping", self.heartbeat.receive)
+        self.rpc.register("request_vote", self.election.request_vote)
+        self.rpc.register("become_follower", self.election.become_follower)
+        self.rpc.register("handle_client_request", self.handle_client_request)
 
     def start(self):
-        self._thread.start()
-        print(f"Node {self.config.node_id} started on {self.config.host}:{self.config.port}")
+        self.rpc.start()
+        print(
+            f"Node {self.config.node_id} started "
+            f"on {self.config.host}:{self.config.port}"
+        )
 
     def stop(self):
-        self.server.shutdown()
-        self.server.server_close()
+        self.rpc.stop()
         print(f"Node {self.config.node_id} stopped")
 
     def hello(self, sender_id):
-        return {
-            "status": "ok",
-            "node_id": self.config.node_id,
-            "role": self.role,
-            "leader_id": self.leader_id,
-            "message": "hello from node"
-        }
-
-    def ping(self, sender_id):
-        self.last_heartbeat = time.time()
-        self.role = "FOLLOWER"
-        self.leader_id = sender_id
-        return True
-
-    def request_vote(self, candidate_id):
-        if self.voted_for is None or self.voted_for == candidate_id:
-            self.voted_for = candidate_id
-            return True
-        return False
-
-    def become_leader(self, leader_id):
-        self.role = "LEADER"
-        self.leader_id = leader_id
-        self.last_heartbeat = time.time()
-        return True
-
-    def become_follower(self, leader_id):
-        self.role = "FOLLOWER"
-        self.leader_id = leader_id
-        self.last_heartbeat = time.time()
-        return True
-
-    def handle_client_request(self, value):
-        if self.role != "LEADER":
-            if self.leader_id is not None:
-                leader_peer = self._peer_by_id(self.leader_id)
-                if leader_peer:
-                    return self.call_peer(leader_peer, "handle_client_request", value)
+        with self.state.lock:
             return {
-                "status": "forward",
-                "leader_id": self.leader_id,
-                "value": value
+                "status": "ok",
+                "node_id": self.state.node_id,
+                "role": self.state.role,
+                "leader_id": self.state.leader_id,
             }
 
-        return {
-            "status": "accepted",
-            "node_id": self.config.node_id,
-            "value": value
-        }
+    def handle_client_request(self, value):
+        with self.state.lock:
+            role = self.state.role
+            leader_id = self.state.leader_id
 
-    def call_peer(self, peer: str, method: str, *args):
-        host, port = peer.split(":")
-        proxy = xmlrpc.client.ServerProxy(f"http://{host}:{port}", allow_none=True)
-        return getattr(proxy, method)(*args)
+        if role == "LEADER":
+            return {
+                "status": "accepted",
+                "node_id": self.state.node_id,
+                "value": value,
+            }
 
-    def _peer_by_id(self, node_id):
-        for peer in self.config.peers:
-            host, port = peer.split(":")
-            if int(port) == 8000 + node_id:
-                return peer
-        return None
+        if leader_id is None or leader_id == self.state.node_id:
+            return {
+                "status": "error",
+                "message": "No usable leader known",
+            }
+
+        try:
+            return self.rpc.call(
+                leader_id,
+                "handle_client_request",
+                value,
+            )
+        except Exception as error:
+            return {
+                "status": "error",
+                "message": f"Leader unreachable: {error}",
+            }

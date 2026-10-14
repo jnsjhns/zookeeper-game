@@ -6,4 +6,4 @@ class NodeConfig:
     node_id: int
     host: str = "127.0.0.1"
     port: int = 8001
-    peers: list[str] = field(default_factory=list)
+    peers: dict[int, str] = field(default_factory=dict)
