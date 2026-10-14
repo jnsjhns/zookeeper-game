@@ -60,11 +60,6 @@ Each node listens on port `8000 + node_id`:
 | Node 4 | `127.0.0.1:8004` |
 | Node 5 | `127.0.0.1:8005` |
 
-Wait until every node prints:
-
-```text
-RECOVERY COMPLETE
-```
 
 ## Run a write test
 
