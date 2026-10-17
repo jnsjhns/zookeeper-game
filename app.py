@@ -15,9 +15,24 @@ def main():
         required=True,
         choices=sorted(NODES),
     )
+    parser.add_argument(
+        "--guesses-per-round",
+        type=int,
+        default=2,
+        help=(
+            "Committed guesses required to finish a round "
+            "(minimum: 2, default: 2)"
+        ),
+    )
 
     args = parser.parse_args()
-    node = Node(create_config(args.node))
+    if args.guesses_per_round < 2:
+        parser.error("--guesses-per-round must be at least 2")
+
+    node = Node(
+        create_config(args.node),
+        guesses_per_round=args.guesses_per_round,
+    )
     node.start()
 
     print(f"Log file: {node.log.path.resolve()}")

@@ -10,7 +10,7 @@ from sync import FollowerSyncManager
 
 
 class Node:
-    def __init__(self, config: NodeConfig):
+    def __init__(self, config: NodeConfig, guesses_per_round: int = 2):
         self.config = config
 
         self.state = NodeState(node_id=config.node_id)
@@ -35,6 +35,7 @@ class Node:
             self.state,
             self.log,
             self.rpc,
+            guesses_per_round=guesses_per_round,
         )
 
         self.recovery = RecoveryManager(
@@ -76,6 +77,10 @@ class Node:
         self.rpc.register(
             "write",
             self.replication.write,
+        )
+        self.rpc.register(
+            "guess",
+            self.replication.guess,
         )
         self.rpc.register(
             "read",

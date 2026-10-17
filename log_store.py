@@ -1,7 +1,16 @@
 import json
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def current_timestamp():
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 class LogStore:
@@ -18,13 +27,18 @@ class LogStore:
         seq: int,
         op: str,
         value: int,
+        timestamp: str | None = None,
     ):
+        if timestamp is None:
+            timestamp = current_timestamp()
+
         entry = {
             "epoch": epoch,
             "seq": seq,
             "op": op,
             "value": value,
             "status": "PROPOSED",
+            "timestamp": timestamp,
         }
         self._validate(entry)
 
@@ -39,6 +53,25 @@ class LogStore:
                     raise ValueError(
                         f"Conflicting proposal for tag ({epoch}, {seq})"
                     )
+
+                existing_timestamp = existing.get("timestamp")
+                if (
+                    existing_timestamp is not None
+                    and existing_timestamp != timestamp
+                ):
+                    raise ValueError(
+                        f"Conflicting timestamp for tag ({epoch}, {seq})"
+                    )
+
+                if existing_timestamp is None:
+                    entries = [item.copy() for item in self._entries]
+                    for item in entries:
+                        if self._tag(item) == (epoch, seq):
+                            item["timestamp"] = timestamp
+                    self._persist(entries)
+                    self._entries = entries
+
+                    return self._find(epoch, seq).copy()
 
                 return existing.copy()
 
@@ -91,6 +124,17 @@ class LogStore:
 
             return None
 
+    def latest_target(self):
+        with self._lock:
+            for entry in reversed(self._entries):
+                if (
+                    entry["status"] == "COMMITTED"
+                    and entry["op"] == "WRITE"
+                ):
+                    return entry.copy()
+
+            return None
+
     def all_entries(self):
         with self._lock:
             return [entry.copy() for entry in self._entries]
@@ -119,6 +163,20 @@ class LogStore:
                     raise ValueError(
                         f"Conflicting log entries for tag {tag}"
                     )
+
+                existing_timestamp = existing.get("timestamp")
+                incoming_timestamp = entry.get("timestamp")
+                if (
+                    existing_timestamp is not None
+                    and incoming_timestamp is not None
+                    and existing_timestamp != incoming_timestamp
+                ):
+                    raise ValueError(
+                        f"Conflicting timestamps for tag {tag}"
+                    )
+
+                if existing_timestamp is None and incoming_timestamp is not None:
+                    existing["timestamp"] = incoming_timestamp
 
                 # Never downgrade a committed entry.
                 if entry["status"] == "COMMITTED":
@@ -183,8 +241,13 @@ class LogStore:
             "value",
             "status",
         }
+        optional = {"timestamp"}
 
-        if not isinstance(entry, dict) or set(entry) != required:
+        if (
+            not isinstance(entry, dict)
+            or not required.issubset(entry)
+            or set(entry) - required - optional
+        ):
             raise ValueError("Invalid log entry fields")
 
         for field in ("epoch", "seq", "value"):
@@ -208,6 +271,25 @@ class LogStore:
 
         if entry["status"] not in {"PROPOSED", "COMMITTED"}:
             raise ValueError("Invalid entry status")
+
+        if "timestamp" in entry:
+            timestamp = entry["timestamp"]
+            if not isinstance(timestamp, str):
+                raise ValueError("timestamp must be a string")
+
+            try:
+                parsed = datetime.fromisoformat(
+                    timestamp.replace("Z", "+00:00")
+                )
+            except ValueError as error:
+                raise ValueError(
+                    "timestamp must be an ISO-8601 datetime"
+                ) from error
+
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValueError(
+                    "timestamp must include a timezone"
+                )
 
     def _load(self):
         if not self.path.exists():

@@ -27,6 +27,7 @@ heartbeat.py               Leader heartbeat monitoring
 replication.py             Proposal, ACK, and commit handling
 recovery.py                Log synchronization after election
 sync.py                    Catch-up synchronization during normal operation
+game_client.py             Interactive Write/Guess/Read client
 cluster_smoke_test.py      Command-line write/read smoke test
 data/                      Persistent log files
 ```
@@ -50,6 +51,10 @@ python app.py --node 4
 python app.py --node 5
 ```
 
+By default, a round completes after two committed guesses. The minimum is two;
+there is no fixed upper limit. To change the number required, pass the same
+`--guesses-per-round` value (2 or greater) to every node.
+
 Each node listens on port `8000 + node_id`:
 
 | Node | Address |
@@ -60,6 +65,40 @@ Each node listens on port `8000 + node_id`:
 | Node 4 | `127.0.0.1:8004` |
 | Node 5 | `127.0.0.1:8005` |
 
+## Play the number game
+
+Start an interactive client connected to any node:
+
+```powershell
+python game_client.py --node 1
+```
+
+Run a separate client process in each player's terminal. At the prompt:
+
+- Enter `w` to set or replace the target value (0-100).
+- Enter `g` to submit a guess (0-100).
+- Enter `r` to read the latest committed target.
+- Enter `q` to exit.
+
+The first player should use `w` to set the initial target. Each `g` submission
+is replicated and committed as a `GUESS`. Once the configured number of guesses
+has committed, the leader selects the guess closest to the target and commits
+that value as the next target. If guesses are equally close, the earliest
+committed guess wins. The target remains unchanged while guesses are being
+collected. When a round completes, the client displays both the old and new
+target values.
+
+For example, with the default threshold of two guesses, set the target to 50,
+then submit guesses of 30 and 62. The leader selects 62 and the next target
+becomes 62. Players can run separate client processes and connect to different
+nodes; follower nodes forward game requests to the leader.
+
+All nodes in the cluster should use the same guess threshold. For example, to
+require five guesses per round:
+
+```powershell
+python app.py --node 1 --guesses-per-round 5
+```
 
 ## Run a write test
 
@@ -153,7 +192,8 @@ Each log entry contains:
   "seq": 8,
   "op": "WRITE",
   "value": 100,
-  "status": "COMMITTED"
+  "status": "COMMITTED",
+  "timestamp": "2026-10-17T09:30:00.123Z"
 }
 ```
 
@@ -161,11 +201,14 @@ Each log entry contains:
 - `seq` is the proposal sequence number within that epoch.
 - `op` is either `WRITE` or `GUESS`.
 - `status` is either `PROPOSED` or `COMMITTED`.
+- `timestamp` is the UTC time when the leader created the proposal. The same
+  timestamp is replicated to every node. Older entries without a timestamp
+  remain readable.
 
 
-## Current status
+## Defence preparation
 
-Implemented and manually tested:
+Implemented:
 
 - Five-node local cluster
 - Leader election
@@ -174,9 +217,12 @@ Implemented and manually tested:
 - Quorum-based write commits
 - Recovery after leader failure
 - Automatic catch-up synchronization for late-joining followers
+- Interactive Write/Guess/Read client
+- Closest-guess selection and next-round target commit
 
-Still to implement:
+Still to prepare and verify:
 
-- Client guess flow
-- Leader-side collection and selection of the closest guess
-- Client application for interactive `Write` and `Guess` commands
+- Run and capture evidence for all three defence scenarios: normal write,
+  guessing, and leader crash/recovery
+- Report with screenshots/recordings and a short analysis of design choices
+- Source-code archive for submission before the defence

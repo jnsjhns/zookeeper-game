@@ -1,7 +1,7 @@
 import threading
 
 from config import NodeConfig
-from log_store import LogStore
+from log_store import LogStore, current_timestamp
 from rpc import RpcTransport
 from state import NodeState
 
@@ -13,13 +13,20 @@ class ReplicationManager:
         state: NodeState,
         log: LogStore,
         rpc: RpcTransport,
+        guesses_per_round: int = 2,
     ):
+        if type(guesses_per_round) is not int or guesses_per_round < 2:
+            raise ValueError(
+                "guesses_per_round must be an integer of at least 2"
+            )
+
         self.config = config
         self.state = state
         self.log = log
         self.rpc = rpc
+        self.guesses_per_round = guesses_per_round
 
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
 
         self.peer_timeout = 2.0
         self.forward_timeout = 15.0
@@ -57,12 +64,66 @@ class ReplicationManager:
         if role == "LEADER":
             return self._propose_and_commit("WRITE", value)
 
+        return self._forward_or_unavailable("write", value, role, leader_id)
+
+    def guess(self, value):
+        if type(value) is not int or not 0 <= value <= 100:
+            return {
+                "status": "error",
+                "message": "Guess must be an integer between 0 and 100",
+            }
+
+        with self.state.lock:
+            role = self.state.role
+            leader_id = self.state.leader_id
+
+        if role == "LEADER":
+            with self._write_lock:
+                pending = self._pending_guesses()
+                if len(pending["guesses"]) >= self.guesses_per_round:
+                    completion = self._finish_round_locked(pending)
+                    if completion["status"] != "committed":
+                        return {
+                            "status": "unavailable",
+                            "message": (
+                                "The previous round is awaiting a "
+                                "quorum commit"
+                            ),
+                        }
+
+                if self.log.latest_target() is None:
+                    return {
+                        "status": "error",
+                        "message": "Set the target with Write before guessing",
+                    }
+
+                result = self._propose_and_commit("GUESS", value)
+                if result.get("status") != "committed":
+                    return result
+
+                pending = self._pending_guesses()
+                if len(pending["guesses"]) >= self.guesses_per_round:
+                    round_result = self._finish_round_locked(pending)
+                    result["round"] = round_result
+                else:
+                    result["round"] = {
+                        "status": "collecting",
+                        "guesses_received": len(pending["guesses"]),
+                        "guesses_required": self.guesses_per_round,
+                        "target": pending["target"]["value"],
+                    }
+
+                return result
+
+        return self._forward_or_unavailable("guess", value, role, leader_id)
+
+    def _forward_or_unavailable(self, method, value, role, leader_id):
         if role in {"CANDIDATE", "RECOVERING"}:
             return {
                 "status": "unavailable",
                 "message": (
                     "Election or recovery in progress; "
-                    "writes are disabled"
+                    "client operations are unavailable"
                 ),
             }
 
@@ -75,7 +136,7 @@ class ReplicationManager:
         try:
             return self.rpc.call(
                 leader_id,
-                "write",
+                method,
                 value,
                 timeout=self.forward_timeout,
             )
@@ -84,13 +145,13 @@ class ReplicationManager:
             return {
                 "status": "error",
                 "message": (
-                    "Forwarding failed; write outcome unknown: "
+                    f"Forwarding {method} failed; outcome unknown: "
                     f"{error}"
                 ),
             }
 
     def read(self):
-        entry = self.log.latest_committed()
+        entry = self.log.latest_target()
 
         return {
             "status": "ok",
@@ -100,7 +161,77 @@ class ReplicationManager:
                 entry["epoch"],
                 entry["seq"],
             ],
+            "timestamp": None if entry is None else entry.get("timestamp"),
         }
+
+    def complete_pending_round(self):
+        with self._write_lock:
+            pending = self._pending_guesses()
+            if len(pending["guesses"]) < self.guesses_per_round:
+                return None
+
+            return self._finish_round_locked(pending)
+
+    def _pending_guesses(self):
+        entries = self.log.all_entries()
+        target_index = None
+
+        for index, entry in enumerate(entries):
+            if entry["op"] == "WRITE" and entry["status"] == "COMMITTED":
+                target_index = index
+
+        if target_index is None:
+            return {"target": None, "guesses": []}
+
+        target = entries[target_index]
+        guesses = [
+            entry
+            for entry in entries[target_index + 1:]
+            if entry["op"] == "GUESS" and entry["status"] == "COMMITTED"
+        ]
+
+        return {"target": target, "guesses": guesses}
+
+    def _finish_round_locked(self, pending):
+        target_value = pending["target"]["value"]
+        winner = min(
+            pending["guesses"],
+            key=lambda entry: (
+                abs(entry["value"] - target_value),
+                entry["epoch"],
+                entry["seq"],
+            ),
+        )
+        result = self._propose_and_commit("WRITE", winner["value"])
+
+        round_result = {
+            "status": result["status"],
+            "selected_guess": winner["value"],
+            "target": (
+                winner["value"]
+                if result["status"] == "committed"
+                else target_value
+            ),
+            "old_target": target_value,
+            "new_target": (
+                winner["value"]
+                if result["status"] == "committed"
+                else None
+            ),
+            "target_before_round": target_value,
+            "guesses_received": len(pending["guesses"]),
+            "guesses_required": self.guesses_per_round,
+            "write_result": result,
+        }
+
+        if result["status"] == "committed":
+            print(
+                f"ROUND COMPLETE: old target = {target_value}, "
+                f"new target = {winner['value']} "
+                f"(selected guess = {winner['value']})"
+            )
+
+        return round_result
 
     def _propose_and_commit(self, op, value):
         with self._write_lock:
@@ -122,12 +253,14 @@ class ReplicationManager:
 
                 self.seq += 1
                 seq = self.seq
+                timestamp = current_timestamp()
 
                 self.log.append_proposal(
                     epoch,
                     seq,
                     op,
                     value,
+                    timestamp,
                 )
 
             print(f"PROPOSED ({epoch}, {seq}): {op} {value}")
@@ -148,6 +281,7 @@ class ReplicationManager:
                         op,
                         value,
                         self.state.node_id,
+                        timestamp,
                         timeout=self.peer_timeout,
                     )
 
@@ -157,6 +291,7 @@ class ReplicationManager:
                         term,
                         epoch,
                         seq,
+                        timestamp,
                     ):
                         acknowledgements.add(peer_id)
 
@@ -247,6 +382,7 @@ class ReplicationManager:
                 "epoch": epoch,
                 "seq": seq,
                 "value": value,
+                "timestamp": timestamp,
                 "acks": len(acknowledgements),
                 "quorum": quorum,
                 "pending_peers": pending_peers,
@@ -260,6 +396,7 @@ class ReplicationManager:
         op,
         value,
         leader_id,
+        timestamp,
     ):
         with self.state.lock:
             self._check_leader(term, leader_id)
@@ -269,6 +406,7 @@ class ReplicationManager:
                 seq,
                 op,
                 value,
+                timestamp,
             )
 
         print(f"PROPOSED ({epoch}, {seq}): {op} {value}")
@@ -279,6 +417,7 @@ class ReplicationManager:
             "term": term,
             "epoch": entry["epoch"],
             "seq": entry["seq"],
+            "timestamp": entry["timestamp"],
         }
 
     def receive_commit(self, term, epoch, seq, leader_id):
@@ -306,7 +445,7 @@ class ReplicationManager:
             )
 
     @staticmethod
-    def _valid_ack(response, peer_id, term, epoch, seq):
+    def _valid_ack(response, peer_id, term, epoch, seq, timestamp):
         return (
             isinstance(response, dict)
             and response.get("status") == "ACK"
@@ -314,4 +453,5 @@ class ReplicationManager:
             and response.get("term") == term
             and response.get("epoch") == epoch
             and response.get("seq") == seq
+            and response.get("timestamp") == timestamp
         )

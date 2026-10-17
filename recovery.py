@@ -91,6 +91,20 @@ class RecoveryManager:
                         f"Conflicting entries for tag {tag}"
                     )
 
+                existing_timestamp = existing.get("timestamp")
+                incoming_timestamp = entry.get("timestamp")
+                if (
+                    existing_timestamp is not None
+                    and incoming_timestamp is not None
+                    and existing_timestamp != incoming_timestamp
+                ):
+                    raise ValueError(
+                        f"Conflicting timestamps for tag {tag}"
+                    )
+
+                if existing_timestamp is None and incoming_timestamp is not None:
+                    existing["timestamp"] = incoming_timestamp
+
                 if entry["status"] == "COMMITTED":
                     existing["status"] = "COMMITTED"
 
@@ -254,6 +268,13 @@ class RecoveryManager:
 
             self.replication.begin_epoch(new_epoch)
             self.state.role = "LEADER"
+
+        pending_round = self.replication.complete_pending_round()
+        if pending_round is not None and pending_round["status"] != "committed":
+            print(
+                "Pending guess round could not be completed: "
+                f"{pending_round['write_result']}"
+            )
 
         print(
             f"RECOVERY COMPLETE: Node {self.state.node_id}, "
