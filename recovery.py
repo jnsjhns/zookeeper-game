@@ -277,9 +277,9 @@ class RecoveryManager:
             )
 
         print(
-            f"RECOVERY COMPLETE: Node {self.state.node_id}, "
-            f"term {term}, epoch {new_epoch}, "
-            f"{len(committed)} synchronized nodes"
+            f"RECOVERY COMPLETE: Node {self.state.node_id} is LEADER, "
+            f"term {term}, epoch {new_epoch}; "
+            f"{len(committed)}/{len(self.config.peers) + 1} nodes synchronized"
         )
 
     def install(self, term, leader_id, entries):
