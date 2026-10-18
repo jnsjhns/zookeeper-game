@@ -28,7 +28,6 @@ replication.py             Proposal, ACK, and commit handling
 recovery.py                Log synchronization after election
 sync.py                    Catch-up synchronization during normal operation
 game_client.py             Interactive Write/Guess/Read client
-cluster_smoke_test.py      Command-line write/read smoke test
 data/                      Persistent log files
 ```
 
@@ -88,63 +87,102 @@ committed guess wins. The target remains unchanged while guesses are being
 collected. When a round completes, the client displays both the old and new
 target values.
 
-For example, with the default threshold of two guesses, set the target to 50,
-then submit guesses of 30 and 62. The leader selects 62 and the next target
-becomes 62. Players can run separate client processes and connect to different
-nodes; follower nodes forward game requests to the leader.
 
-All nodes in the cluster should use the same guess threshold. For example, to
-require five guesses per round:
+## Defence scenarios using the interactive client
 
-```powershell
-python app.py --node 1 --guesses-per-round 5
-```
+The defence should be demonstrated through the interactive game client.
 
-## Run a write test
+### Scenario 1: Normal write and read flow
 
-Use `cluster_smoke_test.py` to send a write to any node:
-
-```powershell
-python cluster_smoke_test.py --node 1 --value 42
-```
-
-To send the write through a follower:
-
-```powershell
-python cluster_smoke_test.py --node 3 --value 90
-```
-
-The script prints:
-
-- The contacted node and its current role
-- The result of the write request
-- The current target value after the write
-
-## Read the current target
-
-To inspect the current target through a node:
-
-```powershell
-python cluster_smoke_test.py --node 5 --value 42
-```
-
-The final `Read result` line shows the value currently visible on that node.
-
-For a proper consistency check, run the same command against several nodes and
-compare the reported target values.
-
-## Test the leader-crash flow
-
-1. Start all five nodes.
-2. Perform a successful write:
+1. Start all five nodes:
 
    ```powershell
-   python cluster_smoke_test.py --node 1 --value 10
+   python app.py --node 1
+   python app.py --node 2
+   python app.py --node 3
+   python app.py --node 4
+   python app.py --node 5
    ```
 
-3. Identify the current leader from the node output.
-4. Stop the leader process with `Ctrl+C`.
-5. Wait for the remaining nodes to print election and recovery messages:
+2. Connect to any node with the interactive client:
+
+   ```powershell
+   python game_client.py --node 1
+   ```
+
+3. Write a value such as `10`:
+
+   ```text
+   > w
+   New target (0-100): 10
+   ```
+
+4. Read the value back from the same or another node:
+
+   ```text
+   > r
+   ```
+
+5. Confirm that the value is visible across the cluster and that the leader has
+   processed the write successfully.
+
+This demonstrates that writes are accepted by the leader and that the target is
+replicated consistently across followers.
+
+### Scenario 2: Guessing flow with multiple clients
+
+This is the main round-based case for the defence.
+
+1. Start the full five-node cluster.
+2. Connect a client to any node and set the target to `50`:
+
+   ```text
+   > w
+   New target (0-100): 50
+   ```
+
+3. Open a second client and submit a guess from a different player:
+
+   ```text
+   > g
+   Your guess (0-100): 30
+   ```
+
+4. Open a third client and submit another guess:
+
+   ```text
+   > g
+   Your guess (0-100): 62
+   ```
+
+5. The leader collects both guesses and, once the configured threshold is hit,
+   selects the closest value to the target. With the default threshold of two,
+   the second guess completes the round.
+
+6. The client should show a round result such as:
+
+   ```text
+   Round complete: old target = 50, new target = 62
+   ```
+
+7. Read the value again to verify that the new target is visible on the cluster.
+
+This demonstrates the intended flow: multiple clients submit guesses, the leader
+selects the closest value, and the next target is committed before the next
+round starts.
+
+### Scenario 3: Leader crash and recovery
+
+1. Start all five nodes and confirm the leader is active.
+2. Connect a client to any node and write a value such as `10`:
+
+   ```text
+   > w
+   New target (0-100): 10
+   ```
+
+3. Stop the current leader process with `Ctrl+C`.
+4. Wait until the remaining nodes print election and recovery messages, such as:
 
    ```text
    ELECTION START
@@ -153,28 +191,27 @@ compare the reported target values.
    RECOVERY COMPLETE
    ```
 
-6. Send another write through a follower:
+5. Connect to a follower node and submit another write, for example `30`:
 
-   ```powershell
-   python cluster_smoke_test.py --node 3 --value 30
+   ```text
+   > w
+   New target (0-100): 30
    ```
 
-7. Verify that the new value is visible on the remaining nodes:
+6. Read from multiple follower nodes and confirm that they all see the same
+   updated target value.
 
-   ```powershell
-   python cluster_smoke_test.py --node 2 --value 30
-   python cluster_smoke_test.py --node 4 --value 30
-   python cluster_smoke_test.py --node 5 --value 30
-   ```
-
-8. Restart the old leader:
+7. Restart the old leader process:
 
    ```powershell
    python app.py --node 1
    ```
 
-9. Wait for the old leader to synchronize its log. It should become a follower
-   and contain the same committed entries as the other nodes.
+8. Wait for the restarted node to resynchronize. It should become a follower and
+   contain the same committed history as the cluster.
+
+This confirms that the cluster can recover from a leader failure, elect a new
+leader, and continue to serve consistent writes and reads.
 
 ## Logs
 
@@ -206,23 +243,3 @@ Each log entry contains:
   remain readable.
 
 
-## Defence preparation
-
-Implemented:
-
-- Five-node local cluster
-- Leader election
-- Heartbeat monitoring
-- Persistent logs
-- Quorum-based write commits
-- Recovery after leader failure
-- Automatic catch-up synchronization for late-joining followers
-- Interactive Write/Guess/Read client
-- Closest-guess selection and next-round target commit
-
-Still to prepare and verify:
-
-- Run and capture evidence for all three defence scenarios: normal write,
-  guessing, and leader crash/recovery
-- Report with screenshots/recordings and a short analysis of design choices
-- Source-code archive for submission before the defence
