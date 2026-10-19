@@ -77,6 +77,8 @@ class ReplicationManager:
             role = self.state.role
             leader_id = self.state.leader_id
 
+        # If the node is the leader, handle the guess locally. 
+        # If not, forward the request to the leader or return an error if no leader is known.
         if role == "LEADER":
             with self._write_lock:
                 pending = self._pending_guesses()
@@ -91,20 +93,28 @@ class ReplicationManager:
                             ),
                         }
 
+                # If the target has not been set, return an error indicating that a write operation is required before guessing.
                 if self.log.latest_target() is None:
                     return {
                         "status": "error",
                         "message": "Set the target with Write before guessing",
                     }
 
+                # Propose the guess and commit it if a quorum is reached. If the round is complete, return the round result; 
+                # otherwise, return the current round status.
                 result = self._propose_and_commit("GUESS", value)
                 if result.get("status") != "committed":
                     return result
 
                 pending = self._pending_guesses()
                 if len(pending["guesses"]) >= self.guesses_per_round:
+                # If the round is complete, finish the round and return the round result, including the old target, 
+                # new target, selected guess, and the number of guesses received.
                     round_result = self._finish_round_locked(pending)
                     result["round"] = round_result
+                
+                # If the round is still collecting guesses, return the current round status, 
+                # including the number of guesses received and the target value.
                 else:
                     result["round"] = {
                         "status": "collecting",
@@ -118,6 +128,7 @@ class ReplicationManager:
         return self._forward_or_unavailable("guess", value, role, leader_id)
 
     def _forward_or_unavailable(self, method, value, role, leader_id):
+        # If the node is not the leader, either forward the request to the leader or return an error if no leader is known.
         if role in {"CANDIDATE", "RECOVERING"}:
             return {
                 "status": "unavailable",
@@ -127,6 +138,7 @@ class ReplicationManager:
                 ),
             }
 
+        # If the node is a follower, forward the request to the known leader. If no leader is known, return an error.
         if leader_id is None or leader_id == self.state.node_id:
             return {
                 "status": "unavailable",
@@ -164,6 +176,9 @@ class ReplicationManager:
             "timestamp": None if entry is None else entry.get("timestamp"),
         }
 
+    # Complete the pending round if enough guesses have been received. 
+    # If the round is complete, determine the winner and propose a new target based on the winning guess. 
+    #Return the round result, including the old target, new target, selected guess, and the number of guesses received.
     def complete_pending_round(self):
         with self._write_lock:
             pending = self._pending_guesses()
@@ -172,6 +187,7 @@ class ReplicationManager:
 
             return self._finish_round_locked(pending)
 
+    # checks if there is a pending round and returns the target and guesses if so, otherwise returns None
     def _pending_guesses(self):
         entries = self.log.all_entries()
         target_index = None
@@ -233,6 +249,8 @@ class ReplicationManager:
 
         return round_result
 
+    # Propose an operation and commit it if a quorum of acknowledgements is received. 
+    # If the proposal is committed, return the commit result; otherwise, return the proposal result.
     def _propose_and_commit(self, op, value):
         with self._write_lock:
             with self.state.lock:
@@ -251,6 +269,7 @@ class ReplicationManager:
                 term = self.state.term
                 epoch = self.epoch
 
+                # Increment the sequence number for this epoch and log the proposal
                 self.seq += 1
                 seq = self.seq
                 timestamp = current_timestamp()
@@ -265,11 +284,13 @@ class ReplicationManager:
 
             print(f"PROPOSED ({epoch}, {seq}): {op} {value}")
 
+            # Determine the quorum size and initialize the acknowledgements set
             total_nodes = len(self.config.peers) + 1
             quorum = total_nodes // 2 + 1
 
             acknowledgements = {self.state.node_id}
 
+            # Send proposal to all peers and collect acknowledgements.
             for peer_id in self.config.peers:
                 try:
                     response = self.rpc.call(
@@ -308,6 +329,7 @@ class ReplicationManager:
                         f"Proposal to Node {peer_id} failed: {error}"
                     )
 
+            # After collecting acknowledgements, check if the proposal can be committed.
             with self.state.lock:
                 if (
                     self.state.role != "LEADER"

@@ -54,6 +54,9 @@ class Node:
             self.replication,
         )
 
+        # Register RPC handlers for various operations.
+        # Each handler is associated with a specific method in the corresponding manager class.
+
         # Status
         self.rpc.register("hello", self.hello)
 

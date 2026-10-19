@@ -45,6 +45,8 @@ class HeartbeatManager:
             if thread.is_alive():
                 thread.join()
 
+    # Receive a heartbeat from a leader node. If the heartbeat is accepted, update the last heartbeat time and return True. 
+    # Otherwise, return False.
     def receive(self, term, leader_id):
         accepted = self.election.receive_heartbeat(term, leader_id)
 
@@ -58,6 +60,9 @@ class HeartbeatManager:
 
         return accepted
 
+    # Send heartbeats to all peers if this node is the leader. 
+    # If a peer does not respond, print a message indicating that the heartbeat failed. 
+    # If a peer responds after previously being unreachable, print a message indicating that the peer is responding again.
     def _send_loop(self):
         while not self._stop_event.is_set():
             with self.state.lock:
@@ -101,6 +106,8 @@ class HeartbeatManager:
             if self._stop_event.wait(self.interval):
                 return
 
+    # Monitor the last heartbeat time and print a message if the heartbeat has timed out. 
+    # If the heartbeat is received again after a timeout, print a message indicating that the heartbeat has been restored.
     def _monitor_loop(self):
         while not self._stop_event.wait(0.2):
             leader_id = None

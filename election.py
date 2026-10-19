@@ -61,6 +61,9 @@ class ElectionManager:
             -status["node_id"],
         )
 
+    # Determine if an election is needed based on the current role, leader status, and last heartbeat time. 
+    # If the node is a leader or recovering, no election is needed. 
+    # If there is no known leader or the last heartbeat has timed out, an election is needed.
     def needs_election(self):
         with self.state.lock:
             if self.state.role in {"LEADER", "RECOVERING"}:
@@ -82,6 +85,9 @@ class ElectionManager:
             except Exception as error:
                 print(f"Election attempt failed: {error}")
 
+    # Start an election by querying the status of all peers, determining the best candidate, and requesting votes. 
+    # If a quorum of votes is received, the node becomes the leader and enters the recovering state. 
+    # If not enough votes are received or a higher term is encountered, the node reverts to a follower role.
     def start_election(self):
         statuses = [self.get_status()]
 
